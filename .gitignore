@@ -1,0 +1,4 @@
+data/
+site/latest.json
+__pycache__/
+*.pyc

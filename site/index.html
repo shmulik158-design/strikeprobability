@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>מד סיכון תקיפה באיראן</title>
+<style>
+  :root {
+    --bg: #f7f6f3; --card: #ffffff; --ink: #1c1c1a; --muted: #6b6a65; --line: #e4e2dc;
+    --accent: #b4452f; --accent-soft: rgba(180, 69, 47, .12); --ok: #2f7a4b; --warn: #b07a12; --bad: #b4452f;
+    --us: #3f6ea8; --il: #8a8a3a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141413; --card: #1d1d1b; --ink: #ecebe6; --muted: #9b9a94; --line: #2e2d2a;
+      --accent: #e0745c; --accent-soft: rgba(224, 116, 92, .16); --ok: #5fb37f; --warn: #d9a441; --bad: #e0745c;
+      --us: #7ea6dc; --il: #c4c46a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Arial, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 16px 48px; }
+  h1 { font-size: 15px; font-weight: 600; color: var(--muted); margin: 0 0 20px; letter-spacing: .01em; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 22px; margin-bottom: 16px; }
+  .big { font-size: clamp(64px, 18vw, 112px); font-weight: 700; line-height: 1; letter-spacing: -.03em;
+         font-variant-numeric: tabular-nums; direction: ltr; text-align: right; }
+  .big small { font-size: .4em; font-weight: 600; color: var(--muted); }
+  .sub { color: var(--muted); margin-top: 10px; }
+  .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-top: 18px; }
+  .meta div { border-top: 1px solid var(--line); padding-top: 8px; }
+  .meta b { display: block; font-size: 13px; color: var(--muted); font-weight: 500; }
+  .meta span { font-variant-numeric: tabular-nums; }
+  a { color: var(--accent); }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+  svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .axis { fill: var(--muted); font-size: 11px; }
+  .grid { stroke: var(--line); }
+  .src { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-top: 1px solid var(--line); font-size: 14px; }
+  .src:first-of-type { border-top: 0; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-inline-end: 6px; }
+  .note { font-size: 13px; color: var(--muted); }
+  .err { color: var(--bad); }
+  .pc { font-size: 22px; font-variant-numeric: tabular-nums; }
+  .legend { display: flex; gap: 16px; margin: -4px 0 8px; }
+  .meta { grid-template-columns: repeat(4, 1fr); }
+  @media (max-width: 600px) { .meta { grid-template-columns: repeat(2, 1fr); } }
+  #method p { margin: 0 0 8px; }
+  #tip { position: fixed; pointer-events: none; background: var(--ink); color: var(--bg); font-size: 12px;
+         padding: 4px 8px; border-radius: 6px; opacity: 0; transition: opacity .1s; direction: ltr; }
+</style>
+</head>
+<body>
+<main>
+  <h1>מד סיכון תקיפה באיראן · שלב 0: שוק בלבד</h1>
+
+  <section class="card">
+    <div class="big" id="p">—</div>
+    <div class="sub" id="sub">טוען…</div>
+    <div class="meta" id="meta"></div>
+  </section>
+
+  <section class="card">
+    <h2>7 ימים אחרונים</h2>
+    <p class="note legend">
+      <span><span class="dot" style="background:var(--accent)"></span>משולב</span>
+      <span><span class="dot" style="background:var(--us)"></span>ארה"ב</span>
+      <span><span class="dot" style="background:var(--il)"></span>ישראל</span>
+    </p>
+    <svg id="chart" viewBox="0 0 700 260" role="img" aria-label="גרף הסתברות 7 ימים"></svg>
+    <p class="note" id="switches"></p>
+  </section>
+
+  <section class="card">
+    <h2>מצב מקורות</h2>
+    <div id="sources"></div>
+  </section>
+
+  <section class="card note" id="method"></section>
+</main>
+<div id="tip"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const pct = (p, d = 1) => (p * 100).toFixed(d) + "%";
+const fmtTime = iso => new Date(iso).toLocaleString("he-IL", { dateStyle: "short", timeStyle: "short" });
+const ago = iso => {
+  const m = Math.round((Date.now() - new Date(iso)) / 60000);
+  return m < 60 ? `לפני ${m} דק׳` : m < 2880 ? `לפני ${Math.round(m / 60)} שע׳` : `לפני ${Math.round(m / 1440)} ימים`;
+};
+const money = v => v == null ? "—" : "$" + Math.round(v).toLocaleString("en-US");
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+fetch("latest.json?" + Date.now()).then(r => r.json()).then(render).catch(e => {
+  $("sub").innerHTML = `<span class="err">לא ניתן לטעון את latest.json (${esc(e.message)})</span>`;
+});
+
+function render(d) {
+  const { combined: c, il, us } = d.current;
+  const src = name => d.sources.find(s => s.source === name) || {};
+  if (!c) {
+    $("sub").innerHTML = `<span class="err">אין כרגע מספר משולב: אחד הרכיבים חסר.</span>`;
+  } else {
+    const cs = src("combined");
+    $("p").innerHTML = pct(c.p_7d, 0).replace("%", "<small>%</small>");
+    $("sub").innerHTML =
+      `ההסתברות שארה"ב או ישראל יתקפו באיראן ב-${d.horizon_days} הימים הקרובים, לפי שווקי Polymarket` +
+      ` · עודכן ${fmtTime(c.observed_at)} (${ago(c.observed_at)})` +
+      (cs.error ? ` · <span class="err">הריצה האחרונה נכשלה, מוצג הערך הטוב האחרון</span>`
+        : cs.stale ? ` · <span class="err">הנתון לא התעדכן ${cs.last_ok ? ago(cs.last_ok) : ""}</span>` : "");
+  }
+  const cell = (k, v) => `<div><b>${k}</b><span>${v}</span></div>`;
+  const ilCell = il ? [
+    cell(`<span class="dot" style="background:var(--il)"></span>ישראל ↔ איראן · 7 ימים`, `<span class="pc">${pct(il.p_7d)}</span>`),
+    cell("שוק", `<a href="${esc(il.url)}" target="_blank" rel="noopener" dir="ltr">${esc(il.question)}</a>`),
+    cell(`שבירה עד ${new Date(il.end).toLocaleDateString("he-IL")}`, `${pct(il.p_window)} · bid/ask ${il.best_bid ?? "—"}/${il.best_ask ?? "—"}`),
+    cell("נפח 24 שע׳ · נזילות", `${money(il.volume_24h)} · ${money(il.liquidity)}`),
+  ] : [cell("ישראל ↔ איראן", `<span class="err">חסר</span>`)];
+  const usCell = us ? [
+    cell(`<span class="dot" style="background:var(--us)"></span>ארה"ב → איראן · 7 ימים`, `<span class="pc">${pct(us.p_7d)}</span>`),
+    cell("קצב תקיפה יומי (מותאם)", `${pct(us.q_daily)} · שגיאת התאמה ${pct(us.rmse)}`),
+    cell("תקיפה אחרונה (הערכה)", us.est_last_strike ? `${new Date(us.est_last_strike).toLocaleDateString("he-IL")} (${us.quiet_days_so_far} ימי שקט)` : "—"),
+    cell("שווקים", us.markets.map(m =>
+      `<span dir="ltr">${esc(m.question.replace("US x Iran Effective Ceasefire by ", "by "))} ${m.yes_price}</span>`).join("<br>") +
+      `<br><a href="${esc(us.url)}" target="_blank" rel="noopener">לשוק</a>`),
+  ] : [cell('ארה"ב → איראן', `<span class="err">חסר</span>`)];
+  $("meta").innerHTML = ilCell.join("") + usCell.join("");
+  chart(d);
+  $("sources").innerHTML = d.sources.map(s => {
+    const color = s.error ? "var(--bad)" : s.stale ? "var(--warn)" : "var(--ok)";
+    const status = s.error ? `<span class="err">נכשל: ${esc(s.error)}</span>`
+      : s.last_ok ? `${ago(s.last_ok)}${s.note ? " · " + esc(s.note) : ""}` : "חסר";
+    return `<div class="src"><span><span class="dot" style="background:${color}"></span>${esc(s.source)}</span><span>${status}</span></div>`;
+  }).join("");
+  $("method").innerHTML =
+    `<p><b>איך מחושב המספר.</b> אין כרגע ב-Polymarket שוק פעיל שעונה ישירות על "האם ארה"ב או ישראל יתקפו באיראן". ` +
+    `לכן המספר מורכב משתי סדרות של שווקי הפסקת אש:</p>` +
+    `<p><b>ישראל:</b> <span dir="ltr">"${esc(d.series_def.il.title_prefix)}…"</span>. הפסקת האש נשברת אם ישראל <i>או איראן</i> ` +
+    `מבצעות תקיפה אווירית או טילית שפוגעת בשטח השנייה. ההסתברות היא 1 פחות מחיר ה-Yes, מנורמלת ל-${d.horizon_days} ימים ` +
+    `בהנחת סיכון קבוע לאורך חלון השוק. עוברים לשוק הבא בסדרה כשנותרים לשוק הנוכחי פחות מ-${d.horizon_days} ימים (קו מקווקו בגרף).</p>` +
+    `<p><b>ארה"ב:</b> <span dir="ltr">"${esc(d.series_def.us.title_prefix)} by…"</span>. השוק נפתר ב-Yes אם עד התאריך מתחילה ` +
+    `תקופה של ${d.series_def.us.quiet_days} ימים רצופים בלי תקיפה אמריקאית. ממחירי כל התאריכים הפתוחים מחלצים הסתברות ` +
+    `יומית לתקיפה, ואת מספר ימי השקט שכבר עברו, כך שהמודל ישחזר את המחירים. מזה מחשבים את ההסתברות ל-${d.horizon_days} ימים.</p>` +
+    `<p><b>שילוב:</b> P = 1 − (1 − P<sub>ישראל</sub>)(1 − P<sub>ארה"ב</sub>), בהנחה שהשניים בלתי תלויים. ` +
+    `במציאות הם קשורים זה לזה, ולכן המספר נוטה לצד הגבוה. הרף התחתון הוא הגבוה מבין השניים. ` +
+    `Kalshi נאסף להשוואה בלבד. נוצר ${fmtTime(d.generated_at)}.</p>`;
+}
+
+function chart(d) {
+  const svg = $("chart"), W = 700, H = 260, L = 8, R = 44, T = 10, B = 26;
+  const end = new Date(d.generated_at).getTime(), start = end - 7 * 864e5;
+  const pts = d.series.map(s => ({ t: new Date(s.t).getTime(), p: s.p, il: s.il, us: s.us })).filter(s => s.t >= start);
+  if (!pts.length) { svg.innerHTML = `<text x="350" y="130" class="axis" text-anchor="middle">אין נתונים</text>`; return; }
+  const maxP = Math.min(1, Math.max(0.05, ...pts.map(s => s.p)) * 1.12);
+  // LTR time axis inside an RTL page: oldest on the left, like every market chart.
+  const x = t => L + (t - start) / (end - start) * (W - L - R);
+  const y = p => T + (1 - p / maxP) * (H - T - B);
+  const step = maxP > .4 ? .1 : maxP > .2 ? .05 : .02;
+  let g = "";
+  for (let v = 0; v <= maxP + 1e-9; v += step) {
+    g += `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/>` +
+         `<text class="axis" x="${W - R + 6}" y="${y(v) + 4}" text-anchor="start">${Math.round(v * 100)}%</text>`;
+  }
+  for (let i = 0; i <= 7; i++) {
+    const t = start + i * 864e5;
+    g += `<text class="axis" x="${x(t)}" y="${H - 6}" text-anchor="middle">${new Date(t).toLocaleDateString("he-IL", { day: "numeric", month: "numeric" })}</text>`;
+  }
+  // Break the line at gaps > 3h so missing data is visible, not interpolated.
+  const line = key => {
+    let path = "", prev = null;
+    for (const s of pts) {
+      path += (prev && s.t - prev.t <= 3 * 36e5 ? "L" : "M") + x(s.t).toFixed(1) + "," + y(s[key]).toFixed(1);
+      prev = s;
+    }
+    return path;
+  };
+  const path = line("p");
+  const area = `${path}L${x(pts.at(-1).t)},${y(0)}L${x(pts[0].t)},${y(0)}Z`;
+  const sw = (d.switches || []).filter(s => new Date(s.t).getTime() >= start).map(s => {
+    const xx = x(new Date(s.t).getTime());
+    return `<line x1="${xx}" x2="${xx}" y1="${T}" y2="${H - B}" stroke="var(--muted)" stroke-dasharray="3 3"/>`;
+  }).join("");
+  const last = pts.at(-1);
+  svg.innerHTML = g + sw +
+    `<path d="${area}" fill="var(--accent-soft)" stroke="none"/>` +
+    `<path d="${line("us")}" fill="none" stroke="var(--us)" stroke-width="1.25" stroke-linejoin="round"/>` +
+    `<path d="${line("il")}" fill="none" stroke="var(--il)" stroke-width="1.25" stroke-linejoin="round"/>` +
+    `<path d="${path}" fill="none" stroke="var(--accent)" stroke-width="2.25" stroke-linejoin="round"/>` +
+    `<circle cx="${x(last.t)}" cy="${y(last.p)}" r="4" fill="var(--accent)"/>` +
+    `<line id="hov" y1="${T}" y2="${H - B}" stroke="var(--ink)" stroke-opacity=".3" visibility="hidden"/>` +
+    `<rect x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent" id="hit"/>`;
+  const tip = $("tip"), hov = $("hov");
+  $("hit").addEventListener("pointermove", ev => {
+    const r = svg.getBoundingClientRect(), t = start + ((ev.clientX - r.left) * W / r.width - L) / (W - L - R) * (end - start);
+    const s = pts.reduce((a, b) => Math.abs(b.t - t) < Math.abs(a.t - t) ? b : a);
+    hov.setAttribute("x1", x(s.t)); hov.setAttribute("x2", x(s.t)); hov.setAttribute("visibility", "visible");
+    tip.textContent = `${new Date(s.t).toLocaleString("he-IL", { dateStyle: "short", timeStyle: "short" })} · ` +
+      `combined ${pct(s.p)} · US ${pct(s.us)} · IL ${pct(s.il)}`;
+    tip.style.left = ev.clientX + 12 + "px"; tip.style.top = ev.clientY - 28 + "px"; tip.style.opacity = 1;
+  });
+  $("hit").addEventListener("pointerleave", () => { tip.style.opacity = 0; hov.setAttribute("visibility", "hidden"); });
+  const n = (d.switches || []).filter(s => new Date(s.t).getTime() >= start);
+  $("switches").textContent = n.length
+    ? "קו מקווקו = מעבר לשוק העוגן הבא: " + n.map(s => `${fmtTime(s.t)} ← ⁦${s.to}⁩`).join(" · ")
+    : "";
+}
+</script>
+</body>
+</html>
