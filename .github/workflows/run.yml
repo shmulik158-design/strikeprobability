@@ -48,6 +48,9 @@ jobs:
           fi
 
       - name: Collect and export
+        env:
+          FAA_CLIENT_ID: ${{ secrets.FAA_CLIENT_ID }}
+          FAA_CLIENT_SECRET: ${{ secrets.FAA_CLIENT_SECRET }}
         run: python run.py ${{ inputs.backfill && '--backfill' || '' }}
 
       - name: Force-push tracker.db as a single commit on the orphan data branch

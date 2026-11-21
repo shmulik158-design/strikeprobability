@@ -72,6 +72,11 @@
   </section>
 
   <section class="card">
+    <h2>אותות (שלב 1 · עדיין לא נכנסים למספר)</h2>
+    <div id="signals"></div>
+  </section>
+
+  <section class="card">
     <h2>מצב מקורות</h2>
     <div id="sources"></div>
   </section>
@@ -126,6 +131,7 @@ function render(d) {
   ] : [cell('ארה"ב → איראן', `<span class="err">חסר</span>`)];
   $("meta").innerHTML = ilCell.join("") + usCell.join("");
   chart(d);
+  signals(d);
   $("sources").innerHTML = d.sources.map(s => {
     const color = s.error ? "var(--bad)" : s.stale ? "var(--warn)" : "var(--ok)";
     const status = s.error ? `<span class="err">נכשל: ${esc(s.error)}</span>`
@@ -144,6 +150,37 @@ function render(d) {
     `<p><b>שילוב:</b> P = 1 − (1 − P<sub>ישראל</sub>)(1 − P<sub>ארה"ב</sub>), בהנחה שהשניים בלתי תלויים. ` +
     `במציאות הם קשורים זה לזה, ולכן המספר נוטה לצד הגבוה. הרף התחתון הוא הגבוה מבין השניים. ` +
     `Kalshi נאסף להשוואה בלבד. נוצר ${fmtTime(d.generated_at)}.</p>`;
+}
+
+function signals(d) {
+  const ind = d.indicators || {}, src = n => d.sources.find(s => s.source === n) || {};
+  const missing = n => {
+    const s = src(n);
+    const why = !s.error ? "" : /not set/.test(s.error) ? "אין מפתח API" : esc(s.error.slice(0, 80));
+    return `<span class="err">חסר${why ? " (" + why + ")" : ""}</span>`;
+  };
+  const staleTag = n => src(n).stale ? ` · <span class="err">ישן</span>` : "";
+  const lv = (levels, keys) => keys.map(k => `${k} ${levels[k]}`).join(" · ");
+  const rows = [];
+  rows.push(["NOTAMs · הגבלות חדשות ב-48 שע׳", ind.notams
+    ? `${ind.notams.value}${ind.notams.no_coverage?.length ? ` · <span class="err">אין כיסוי: ${ind.notams.no_coverage.join(", ")}</span>` : ""}${staleTag("notams")}`
+    : missing("notams")]);
+  for (const [n, label] of [["advisory_us", "אזהרות מסע · ארה״ב"], ["advisory_uk", "אזהרות מסע · בריטניה"]]) {
+    const a = ind[n];
+    rows.push([`${label} · הסלמות ב-48 שע׳`, a
+      ? `${a.value} · <span dir="ltr">${lv(a.levels, ["IR", "IL", "IQ", "LB"])}</span>` +
+        (a.recent.length ? `<br>${a.recent.map(c => `${fmtTime(c.t)} ${esc(c.country)} ${esc(c.kind)}`).join("<br>")}` : "") + staleTag(n)
+      : missing(n)]);
+  }
+  rows.push(["OVX · תנודתיות נפט", ind.ovx
+    ? `${ind.ovx.value.toFixed(1)} · z=${ind.ovx.z30 > 0 ? "+" : ""}${ind.ovx.z30.toFixed(2)} מול 30 ימי מסחר (${new Date(ind.ovx.date).toLocaleDateString("he-IL")})${staleTag("ovx")}`
+    : missing("ovx")]);
+  rows.push(["נושאות מטוסים ב-CENTCOM", ind.usni
+    ? `${ind.usni.carriers.length} <span dir="ltr">(${ind.usni.carriers.join(", ")})</span>` +
+      (ind.usni.change_vs_prev ? ` · שינוי ${ind.usni.change_vs_prev > 0 ? "+" : ""}${ind.usni.change_vs_prev}` : "") +
+      ` · <a href="${esc(ind.usni.url)}" target="_blank" rel="noopener">USNI ${new Date(ind.usni.date).toLocaleDateString("he-IL")}</a>${staleTag("usni_carriers")}`
+    : missing("usni_carriers")]);
+  $("signals").innerHTML = rows.map(([k, v]) => `<div class="src"><span>${k}</span><span>${v}</span></div>`).join("");
 }
 
 function chart(d) {

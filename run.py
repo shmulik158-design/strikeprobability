@@ -11,16 +11,21 @@ import sys
 import traceback
 from datetime import timedelta
 
+from collectors import advisories, notams, ovx, usni
 from collectors import markets as mk
 from db import connect, now_iso, parse_iso, write_obs
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 LATEST = os.path.join(ROOT, "site", "latest.json")
 SERIES_DAYS = 30
+SIGNAL_MODULES = [notams, advisories, ovx, usni]
 
-# Expected update interval per source, in minutes (a source is stale after 2x this).
+# Expected data interval per source, in minutes (a source is stale when its newest data is older than 2x this).
 FREQ_MIN = {mk.SOURCE_COMBINED: 30, mk.SOURCE_IL: 30, mk.SOURCE_US: 30, mk.SOURCE_KALSHI: 30}
 COLLECTORS = list(mk.COLLECTORS)
+for _m in SIGNAL_MODULES:
+    COLLECTORS += _m.COLLECTORS
+    FREQ_MIN.update(_m.FREQ_MIN)
 NOT_BACKFILL = "AND raw_json NOT LIKE '%\"backfill\": true%'"
 
 
@@ -45,6 +50,35 @@ def _latest_live(con, source):
     return {"observed_at": row["observed_at"], **json.loads(row["raw_json"])} if row else None
 
 
+def indicators(con) -> dict:
+    """Latest value of each Phase-1 signal, for display. None = missing (never 0)."""
+    def latest(source, n=1):
+        rows = con.execute("SELECT observed_at, value, raw_json FROM observations WHERE source=? AND ok=1"
+                           " ORDER BY observed_at DESC LIMIT ?", (source, n)).fetchall()
+        return [{"observed_at": r["observed_at"], "value": r["value"], **json.loads(r["raw_json"] or "{}")}
+                for r in rows]
+
+    out = {}
+    n = latest(notams.SOURCE)
+    out["notams"] = None if not n else {
+        "observed_at": n[0]["observed_at"], "value": n[0]["value"],
+        "no_coverage": n[0].get("no_coverage"), "per_fir": n[0].get("per_fir")}
+    for src in (advisories.SOURCE_US, advisories.SOURCE_UK):
+        a = latest(src)
+        out[src] = None if not a else {
+            "observed_at": a[0]["observed_at"], "value": a[0]["value"], "levels": a[0].get("levels"),
+            "recent": [c for c in __import__("collectors.common", fromlist=["x"]).recent_changes(con, src, 24 * 7)
+                       if c["kind"] != "updated"][-5:]}
+    o = latest(ovx.SOURCE)
+    out["ovx"] = None if not o else {"date": o[0]["date"], "value": o[0]["value"], "z30": o[0]["z30"]}
+    u = latest(usni.SOURCE, 2)
+    out["usni"] = None if not u else {
+        "date": u[0]["observed_at"], "carriers": u[0]["carriers"], "amphibs": u[0]["amphibs"],
+        "change_vs_prev": (len(u[0]["carriers"]) - len(u[1]["carriers"])) if len(u) > 1 else None,
+        "title": u[0]["title"], "url": u[0]["url"]}
+    return out
+
+
 def export(con) -> dict:
     now = now_iso()
     since = (parse_iso(now) - timedelta(days=SERIES_DAYS)).isoformat().replace("+00:00", "Z")
@@ -67,12 +101,12 @@ def export(con) -> dict:
     for source, freq in FREQ_MIN.items():
         last = con.execute("SELECT fetched_at, ok, raw_json FROM observations WHERE source=?"
                            f" {NOT_BACKFILL} ORDER BY fetched_at DESC LIMIT 1", (source,)).fetchone()
-        last_ok = con.execute(f"SELECT MAX(fetched_at) FROM observations WHERE source=? AND ok=1 {NOT_BACKFILL}",
-                              (source,)).fetchone()[0]
-        stale = last_ok is None or (parse_iso(now) - parse_iso(last_ok)) > timedelta(minutes=2 * freq)
+        last_ok, last_data = con.execute(f"SELECT MAX(fetched_at), MAX(observed_at) FROM observations"
+                                         f" WHERE source=? AND ok=1 {NOT_BACKFILL}", (source,)).fetchone()
+        stale = last_data is None or (parse_iso(now) - parse_iso(last_data)) > timedelta(minutes=2 * freq)
         raw = json.loads(last["raw_json"]) if last and last["raw_json"] else {}
         sources.append({"source": source, "freq_min": freq, "last_attempt": last["fetched_at"] if last else None,
-                        "last_ok": last_ok, "stale": stale,
+                        "last_ok": last_ok, "last_data": last_data, "stale": stale,
                         "error": raw.get("error") if last and not last["ok"] else None, "note": raw.get("note")})
 
     out = {
@@ -84,6 +118,7 @@ def export(con) -> dict:
         "series": series,
         "switches": switches,
         "sources": sources,
+        "indicators": indicators(con),
     }
     os.makedirs(os.path.dirname(LATEST), exist_ok=True)
     with open(LATEST, "w", encoding="utf-8") as f:
