@@ -13,7 +13,11 @@ from datetime import timedelta
 
 from collectors import advisories, notams, ovx, usni
 from collectors import markets as mk
+from collectors.common import recent_changes
 from db import connect, now_iso, parse_iso, write_obs
+from events import cluster as ev_cluster
+from events import extract as ev_extract
+from events import fetch as ev_fetch
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 LATEST = os.path.join(ROOT, "site", "latest.json")
@@ -26,6 +30,11 @@ COLLECTORS = list(mk.COLLECTORS)
 for _m in SIGNAL_MODULES:
     COLLECTORS += _m.COLLECTORS
     FREQ_MIN.update(_m.FREQ_MIN)
+# Phase 2: event layer (fetch -> extract -> cluster), in this order.
+COLLECTORS += [(ev_fetch.SOURCE, ev_fetch.collect), (ev_extract.SOURCE, ev_extract.collect),
+               (ev_cluster.SOURCE_EVENTS, ev_cluster.collect_or_skip)]
+FREQ_MIN.update({ev_fetch.SOURCE: 30, ev_extract.SOURCE: 30, ev_cluster.SOURCE_EVENTS: 30,
+                 ev_cluster.SOURCE_COVERAGE: 30})
 NOT_BACKFILL = "AND raw_json NOT LIKE '%\"backfill\": true%'"
 
 
@@ -67,8 +76,7 @@ def indicators(con) -> dict:
         a = latest(src)
         out[src] = None if not a else {
             "observed_at": a[0]["observed_at"], "value": a[0]["value"], "levels": a[0].get("levels"),
-            "recent": [c for c in __import__("collectors.common", fromlist=["x"]).recent_changes(con, src, 24 * 7)
-                       if c["kind"] != "updated"][-5:]}
+            "recent": [c for c in recent_changes(con, src, 24 * 7) if c["kind"] != "updated"][-5:]}
     o = latest(ovx.SOURCE)
     out["ovx"] = None if not o else {"date": o[0]["date"], "value": o[0]["value"], "z30": o[0]["z30"]}
     u = latest(usni.SOURCE, 2)
@@ -76,6 +84,13 @@ def indicators(con) -> dict:
         "date": u[0]["observed_at"], "carriers": u[0]["carriers"], "amphibs": u[0]["amphibs"],
         "change_vs_prev": (len(u[0]["carriers"]) - len(u[1]["carriers"])) if len(u) > 1 else None,
         "title": u[0]["title"], "url": u[0]["url"]}
+    e, c = latest(ev_cluster.SOURCE_EVENTS), latest(ev_cluster.SOURCE_COVERAGE)
+    out["events"] = None if not e else {
+        "observed_at": e[0]["observed_at"], "high_new_24h": e[0]["value"],
+        "by_actor": e[0].get("high_new_24h_by_actor"), "events_24h": e[0].get("events_24h"), "top": e[0].get("top")}
+    out["coverage"] = None if not c else {
+        "observed_at": c[0]["observed_at"], "outlets_24h": c[0]["value"],
+        "relevant_articles_24h": c[0].get("relevant_articles_24h"), "unclassified_24h": c[0].get("unclassified_24h")}
     return out
 
 

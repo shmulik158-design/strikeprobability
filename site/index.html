@@ -156,7 +156,8 @@ function signals(d) {
   const ind = d.indicators || {}, src = n => d.sources.find(s => s.source === n) || {};
   const missing = n => {
     const s = src(n);
-    const why = !s.error ? "" : /not set/.test(s.error) ? "אין מפתח API" : esc(s.error.slice(0, 80));
+    const why = !s.error ? "" : /not set/.test(s.error) ? "אין מפתח API"
+      : /no classified|has not succeeded/.test(s.error) ? "הסיווג לא רץ" : esc(s.error.slice(0, 80));
     return `<span class="err">חסר${why ? " (" + why + ")" : ""}</span>`;
   };
   const staleTag = n => src(n).stale ? ` · <span class="err">ישן</span>` : "";
@@ -180,6 +181,20 @@ function signals(d) {
       (ind.usni.change_vs_prev ? ` · שינוי ${ind.usni.change_vs_prev > 0 ? "+" : ""}${ind.usni.change_vs_prev}` : "") +
       ` · <a href="${esc(ind.usni.url)}" target="_blank" rel="noopener">USNI ${new Date(ind.usni.date).toLocaleDateString("he-IL")}</a>${staleTag("usni_carriers")}`
     : missing("usni_carriers")]);
+  const ev = ind.events, cov = ind.coverage;
+  rows.push(["אירועים חדשים בחומרה גבוהה · 24 שע׳", ev
+    ? `${ev.high_new_24h}${ev.by_actor && Object.keys(ev.by_actor).length ? ` <span dir="ltr">(${Object.entries(ev.by_actor).map(([a, n]) => `${a} ${n}`).join(", ")})</span>` : ""}` +
+      ` · ${ev.events_24h} אירועים בסה״כ${staleTag("events")}`
+    : missing("events")]);
+  rows.push(["עוצמת סיקור · מקורות שונים ב-24 שע׳", cov
+    ? `${cov.outlets_24h} · ${cov.relevant_articles_24h} כתבות רלוונטיות` +
+      (cov.unclassified_24h ? ` · <span class="err">${cov.unclassified_24h} עוד לא סווגו</span>` : "") + staleTag("coverage")
+    : missing("coverage")]);
+  if (ev && ev.top && ev.top.length) {
+    rows.push(["אירועים מובילים", ev.top.slice(0, 5).map(t =>
+      `<span dir="ltr">[${t.severity}] ${esc(t.actor)} ${esc(t.action)} ${esc(t.target)} · ${t.n_sources} src</span> ` +
+      `<a href="${esc(t.sample_url)}" target="_blank" rel="noopener" dir="ltr">${esc((t.sample_title || "").slice(0, 70))}</a>`).join("<br>")]);
+  }
   $("signals").innerHTML = rows.map(([k, v]) => `<div class="src"><span>${k}</span><span>${v}</span></div>`).join("");
 }
 
