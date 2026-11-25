@@ -30,11 +30,17 @@ def normalize_title(title: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+BACKOFF_S = [10, 20, 40, 60]   # shared CI runners hit 429 often; 5 of 11 runs failed with 6-24s waits
+SPLIT_DEPTH = 3                # a capped window is halved up to 3 times (at most 8 sub-windows)
+
+
 def _gdelt(params) -> dict:
-    for attempt in range(4):
+    for wait in BACKOFF_S + [None]:
         r = session.get(API, params=params, timeout=60)
         if r.status_code == 429:
-            time.sleep(6 * (attempt + 1))
+            if wait is None:
+                break
+            time.sleep(wait)
             continue
         r.raise_for_status()
         if not r.text.strip():
@@ -43,7 +49,23 @@ def _gdelt(params) -> dict:
             return r.json()
         except ValueError:
             raise RuntimeError(f"GDELT returned non-JSON: {r.text[:200]}")
-    raise RuntimeError("GDELT rate limit (429) after 4 attempts")
+    raise RuntimeError(f"GDELT rate limit (429) after {len(BACKOFF_S) + 1} attempts")
+
+
+def _fetch_window(start, end, depth=0) -> tuple[list, int]:
+    """Articles in [start, end]. If GDELT returns the cap, split the window so nothing is silently dropped.
+    Returns (articles, number_of_windows_still_capped)."""
+    d = _gdelt({"query": QUERY, "mode": "artlist", "format": "json", "maxrecords": MAX_RECORDS, "sort": "datedesc",
+                "startdatetime": start.strftime("%Y%m%d%H%M%S"), "enddatetime": end.strftime("%Y%m%d%H%M%S")})
+    arts = d.get("articles") or []
+    if len(arts) < MAX_RECORDS or depth >= SPLIT_DEPTH:
+        return arts, int(len(arts) >= MAX_RECORDS)
+    mid = start + (end - start) / 2
+    time.sleep(6)
+    a1, c1 = _fetch_window(start, mid, depth + 1)
+    time.sleep(6)
+    a2, c2 = _fetch_window(mid, end, depth + 1)
+    return a1 + a2, c1 + c2
 
 
 def collect(con):
@@ -52,9 +74,7 @@ def collect(con):
     last = con.execute("SELECT MAX(fetched_at) FROM articles").fetchone()[0]
     start = parse_iso(last) - timedelta(minutes=15) if last else now - timedelta(hours=FIRST_RUN_HOURS)
     start = max(start, now - timedelta(days=1))
-    d = _gdelt({"query": QUERY, "mode": "artlist", "format": "json", "maxrecords": MAX_RECORDS, "sort": "datedesc",
-                "startdatetime": start.strftime("%Y%m%d%H%M%S"), "enddatetime": now.strftime("%Y%m%d%H%M%S")})
-    articles = d.get("articles") or []
+    articles, still_capped = _fetch_window(start, now)
     since = to_iso(now - timedelta(days=DEDUPE_DAYS))
     new = dup_url = dup_title = 0
     for a in articles:
@@ -75,5 +95,5 @@ def collect(con):
         new += 1
     write_obs(con, SOURCE, float(new), {"returned": len(articles), "new": new, "dup_url": dup_url,
                                        "dup_title": dup_title, "window_start": to_iso(start),
-                                       "capped": len(articles) >= MAX_RECORDS},
+                                       "capped_windows": still_capped},
               ok=True, observed_at=fetched, fetched_at=fetched)

@@ -1,8 +1,13 @@
 name: run
 
+# Scheduling: GitHub's cron is best-effort and in practice fired ~3 times a day for this repo (Nov 2026).
+# So the workflow keeps itself going: after each run, the `next` job waits for the next :07/:37 slot and
+# dispatches the workflow again (workflow_dispatch from GITHUB_TOKEN is allowed to start new runs).
+# The cron below is only a restarter in case the chain breaks. The `run` concurrency group guarantees a
+# single chain: a newer pending run replaces an older pending one, and nothing runs in parallel.
 on:
   schedule:
-    - cron: "7,37 * * * *"   # every 30 min, off the :00/:30 peak when Actions delays schedules most
+    - cron: "22 * * * *"   # hourly restarter; normally queued behind the chain and replaced
   workflow_dispatch:
     inputs:
       backfill:
@@ -11,10 +16,10 @@ on:
         default: false
 
 permissions:
-  contents: write   # force-push tracker.db to the data branch
+  contents: write   # force-push tracker.db to the data branch; weekly backup release
   pages: write      # deploy site/
   id-token: write   # required by deploy-pages
-  actions: write    # keepalive: gh workflow enable
+  actions: write    # keepalive (gh workflow enable) and the self-dispatch chain
 
 concurrency:
   group: run
@@ -26,11 +31,11 @@ jobs:
     timeout-minutes: 15
     environment:
       name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+      url: ${{ steps.deploy.outputs.page_url || steps.deploy_retry.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -68,24 +73,35 @@ jobs:
               commit -qm "data $(date -u +%Y-%m-%dT%H:%MZ)"
           git push -qf "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
 
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site
 
+      # Pages deploys occasionally fail on GitHub's side ("Fetching artifact metadata failed").
+      # The data is already saved at this point, so try once more before calling the run failed.
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
+        continue-on-error: true
+
+      - name: Wait before retrying the deploy
+        if: steps.deploy.outcome == 'failure'
+        run: sleep 45
+
+      - id: deploy_retry
+        if: steps.deploy.outcome == 'failure'
+        uses: actions/deploy-pages@v5
 
       - name: Keepalive (resets the 60-day inactivity timer)
         if: always()
+        continue-on-error: true   # a transient API 500 here must not mark the run red
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow enable run.yml --repo "$GITHUB_REPOSITORY"
 
   backup:
     # Weekly copy of tracker.db as a release asset, since the data branch keeps no history.
-    if: github.event_name == 'schedule'
     needs: run
     runs-on: ubuntu-latest
     steps:
@@ -99,3 +115,32 @@ jobs:
           git init -q . && git fetch -q --depth=1 "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
           git show FETCH_HEAD:tracker.db > tracker.db
           gh release create "$tag" tracker.db --repo "$GITHUB_REPOSITORY" --title "$tag" --notes "Weekly tracker.db backup" --latest=false
+
+  next:
+    # Keep the chain alive even when `run` failed, so one bad run never stops collection.
+    needs: [run, backup]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Wait for the next :07 / :37 slot
+        run: |
+          now=$(date -u +%s)
+          min=$(date -u +%-M); sec=$(date -u +%-S)
+          # minutes until the next slot that is at least 3 minutes away
+          for slot in 7 37 67 97; do
+            wait=$(( (slot - min) * 60 - sec ))
+            [ "$wait" -ge 180 ] && break
+          done
+          echo "sleeping ${wait}s until $(date -u -d "@$((now + wait))" +%H:%M)Z"
+          sleep "$wait"
+
+      - name: Dispatch the next run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in 1 2 3 4 5; do
+            gh workflow run run.yml --repo "$GITHUB_REPOSITORY" --ref "${GITHUB_REF_NAME}" && exit 0
+            echo "dispatch failed (attempt $i), retrying"; sleep $((i * 15))
+          done
+          exit 1
